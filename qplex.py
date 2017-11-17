@@ -48,6 +48,7 @@ reserved = {
         'cost': 'COST',
         'rows': 'ROWS',
         'width': 'WIDTH',
+        'count': 'COUNT',
 }
 
 tokens = [
@@ -219,18 +220,39 @@ def p_result_stmt(p):
 
 def p_aggregate_stmt(p):
     '''
-    aggregate_stmt : HASH_AGG summary SUBOPS statement
-            | AGGREGATE summary SUBOPS statement
+    aggregate_stmt : aggregate SUBOPS statement
+                    | aggregate condition SUBOPS statement
     '''
-    aggregate_summary = p[2]
-    sub_text = p[4]['text']
+    aggregate = p[1]
+    method = aggregate['method']
+    summary = aggregate['summary']
+    text = ''
+    if (len(p) == 4):
+        p[0] = p[3]
+        sub_text = p[3]['text']
+        text += '{} Perform aggregation {} on result of the previous operation'.format(sub_text, method)
+    else:
+        condition = p[2]
+        p[0] = p[4]
+        sub_text = p[4]['text']
+        text += '{} Perform aggregation {} on result of the previous operation filtered by condition {}'.format(sub_text, method, condition)
+    text += ' to produce the output. {}'.format(summary)
+    p[0]['text'] = text
+
+def p_aggregate(p):
+    '''
+    aggregate : HASH_AGG summary
+            | AGGREGATE summary
+    '''
+    summary = p[2]
     method = ''
     if (p[1] == 'HashAggregate'):
         method = 'without duplicates'
     else:
         method = 'with duplicates'
-    p[0] = p[4]
-    p[0]['text'] = '{} Perform aggregation {} on result of the previous operation to produce the output. {}'.format(sub_text, method, aggregate_summary)
+    p[0] = {}
+    p[0]['method'] = method
+    p[0]['summary'] = summary
 
 def p_append_stmt(p):
     'append_stmt : APPEND summary append_args_stmt'
@@ -305,16 +327,15 @@ def p_seq_scan_stmt(p):
 
 def p_index_scan_stmt(p):
     '''
-    index_scan_stmt : index_scan
-                | index_scan condition
+    index_scan_stmt : index_scan index_stmt_tail
     '''
     index_scan = p[1]
     table_name = index_scan['table_name']
     index = index_scan['index']
     text = 'Performing index scan on table "{}" using B-Tree index "{}"'.format(table_name, index)
-    if (len(p) == 3):
-        condition = p[2]
-        text += ' with condition {}'.format(condition)
+    condition = p[2]
+    if (condition != ''):
+        text += ' with index condition {}'.format(condition)
     summary = index_scan['summary']
     text += '. {}'.format(summary)
     p[0] = {}
@@ -323,22 +344,36 @@ def p_index_scan_stmt(p):
 
 def p_index_only_scan_stmt(p):
     '''
-    index_only_scan_stmt : index_only_scan
-                    | index_only_scan condition
+    index_only_scan_stmt : index_only_scan index_stmt_tail
     '''
     index_scan = p[1]
     table_name = index_scan['table_name']
     index = index_scan['index']
     text = 'Performing index scan on table "{}" getting data only from index "{}"'.format(table_name, index)
-    if (len(p) == 3):
-        condition = p[2]
-        text += ' with condition {}'.format(condition)
+    condition = p[2]
+    if (condition != ''):
+        text += ' with index condition {}'.format(condition)
     text += '. Since the query result can be obtained directly on index, there is no need to access relation'
     summary = index_scan['summary']
     text += '. {}'.format(summary)
     p[0] = {}
     p[0]['text'] = text
     p[0]['table_name'] = table_name
+
+def p_index_stmt_tail(p):
+    '''
+    index_stmt_tail : condition index_stmt_tail
+                    | empty
+    '''
+    if (len(p) == 2):
+        p[0] = ''
+    else:
+        condition = p[1]
+        text = condition
+        tail = p[2]
+        if (p[2] != ''):
+            text += ' and {}'.format(tail)
+        p[0] = text
 
 def p_bmp_scan_stmt(p):
     '''
@@ -426,26 +461,34 @@ def p_nested_join_stmt(p):
     '''
     join_summary = p[1]
     outer_stmt = p[3]
-    outer_table_name = outer_stmt['table_name']
+    outer_table_name = ''
+    if ('table_name' in outer_stmt):
+        outer_table_name += ' "{}"'.format(outer_stmt['table_name'])
     outer_table_text = outer_stmt['text']
     inner_stmt = p[5]
-    inner_table_name = inner_stmt['table_name']
+    inner_table_name = ''
+    if ('table_name' in inner_stmt):
+        inner_table_name += ' "{}"'.format(inner_stmt['table_name'])
     inner_table_text = inner_stmt['text']
-    text = 'First, scan the outer table "{}". {} Then, for each row of the outer table "{}", scan the inner table "{}". {} Perfoming nested loop join on table "{}" and table "{}". {}'.format(outer_table_name, outer_table_text, outer_table_name, inner_table_name, inner_table_text, outer_table_name, inner_table_name, join_summary)
+    text = 'First, scan the outer table{}. {} Then, for each row of the outer table{}, scan the inner table{}. {} Perfoming nested loop join on the two table. {}'.format(outer_table_name, outer_table_text, outer_table_name, inner_table_name, inner_table_text, join_summary)
     p[0] = {}
     p[0]['text'] = text
 
 def p_hash_join_stmt(p):
     'hash_join_stmt : hash_join condition SUBOPS statement SUBOPS statement'
-    join_summary = p[1]
+    summary = p[1]
     condition = p[2]
     outer_stmt = p[4]
-    outer_table_name = outer_stmt['table_name']
+    outer_table_name = ''
+    if ('table_name' in outer_stmt):
+        outer_table_name += ' "{}"'.format(outer_stmt['table_name'])
     outer_table_text = outer_stmt['text']
     inner_stmt = p[6]
-    inner_table_name = inner_stmt['table_name']
+    inner_table_name = ''
+    if ('table_name' in inner_stmt):
+        inner_table_name += ' "{}"'.format(inner_stmt['table_name'])
     inner_table_text = inner_stmt['text']
-    text = 'First, scan the first table "{}" and loaded to the hash table, using the join attribute as the hash key. {} Then, scan the second table "{}" and the appropriate values of every row found are used as hash keys to locate the matching rows in the table. {} Perfoming hash join on table "{}" and table "{}" with condition "{}". {}'.format(outer_table_name, outer_table_text, inner_table_name, inner_table_text, outer_table_name, inner_table_name, condition, join_summary)
+    text = 'First, scan the first table{} and loaded to the hash table, using the join attribute as the hash key. {} Then, scan the second table{} and the appropriate values of every row found are used as hash keys to locate the matching rows in the table. {} Perfoming hash join on the two table with condition "{}". {}'.format(outer_table_name, outer_table_text, inner_table_name, inner_table_text, condition, summary)
     p[0] = {}
     p[0]['text'] = text
 
@@ -464,15 +507,19 @@ def p_hash_stmt(p):
 
 def p_merge_join_stmt(p):
     'merge_join_stmt : merge_join condition SUBOPS statement SUBOPS statement'
-    join_summary = p[1]
+    summary = p[1]
     condition = p[2]
     outer_stmt = p[4]
-    outer_table_name = outer_stmt['table_name']
+    outer_table_name = ''
+    if ('table_name' in outer_stmt):
+        outer_table_name += ' "{}"'.format(outer_stmt['table_name'])
     outer_table_text = outer_stmt['text']
     inner_stmt = p[6]
-    inner_table_name = inner_stmt['table_name']
+    inner_table_name = ''
+    if ('table_name' in inner_stmt):
+        inner_table_name += ' "{}"'.format(inner_stmt['table_name'])
     inner_table_text = inner_stmt['text']
-    text = 'First, sort the outer table "{}". {} Then, sort the inner table "{}". Then the two relations are scanned in parallel, and matching rows are combined to form join rows. {} Perfoming merge join on table "{}" and table "{}" with condition "{}". {}'.format(outer_table_name, outer_table_text, inner_table_name, inner_table_text, outer_table_name, inner_table_name, condition, join_summary)
+    text = 'First, sort the outer table{}. {} Then, sort the inner table{}.  Then the two relations are scanned in parallel, and matching rows are combined to form join rows. {} Perfoming merge join on the two table with condition "{}". {}'.format(outer_table_name, outer_table_text, inner_table_name, inner_table_text, condition, summary)
     p[0] = {}
     p[0]['text'] = text
 
@@ -629,8 +676,16 @@ def p_field(p):
             | COST_VAL
             | value
             | attribute
+            | count
     '''
     p[0] = p[1]
+
+def p_count(p):
+    '''
+    count : COUNT LPAREN attribute RPAREN
+    '''
+    attribute = p[3]
+    p[0] = 'number of {}'.format(attribute)
 
 def p_value(p):
     '''
